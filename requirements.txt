@@ -1,0 +1,4 @@
+mediapipe>=1.2      # brings opencv-contrib-python and numpy
+pystray>=0.19
+pillow>=11
+pytest>=8          # tests only
