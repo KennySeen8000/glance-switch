@@ -77,6 +77,8 @@ class App:
             except (ValueError, np.linalg.LinAlgError):
                 log.warning("Stored calibration is unusable", exc_info=True)
                 self.data = None
+        elif self.calib_path.exists():
+            log.info("Calibration from an older version found; a new one is needed")
 
         self.tracker = Tracker(self.settings, face_model_bytes())
         self.activity = Activity()
@@ -122,7 +124,10 @@ class App:
         self.root.destroy()
 
     def _first_run(self) -> None:
-        self.tray.notify("Vamos a calibrar la mirada. Tarda unos 20 segundos.")
+        if self.calib_path.exists():
+            self.tray.notify("Nueva versión con mejor precisión: hay que calibrar otra vez.")
+        else:
+            self.tray.notify("Vamos a calibrar la mirada. Tarda unos 40 segundos.")
         self.start_calibration()
 
     def post(self, command: str) -> None:
@@ -182,9 +187,22 @@ class App:
         elif command == "quit":
             self.quit()
 
+    def accuracy(self) -> float:
+        """Expected gaze error in pixels for this user's calibration (nan if unknown)."""
+        if self.model is None or self.data is None:
+            return float("nan")
+        return self.data.accuracy(self.model)
+
     def _apply_timing(self) -> None:
+        """Adapt to how precise this user's tracking is.
+
+        A less precise model gets a longer dwell, so noise has to persist
+        before it can steal focus.
+        """
         s = self.settings
-        self.decider.dwell_s = s.dwell_ms / 1000
+        acc = self.accuracy()
+        factor = 1.0 if not math.isfinite(acc) else min(1.5, max(1.0, 1 + (acc - 150) / 500))
+        self.decider.dwell_s = s.dwell_ms / 1000 * factor
         self.decider.cooldown_s = s.cooldown_ms / 1000
         self.decider.min_confidence = s.min_confidence
 
@@ -208,21 +226,23 @@ class App:
                 self.data, self.model = result.data, result.model
                 self.data.save(self.calib_path)
                 self.filter.reset()
-                self.tray.notify(f"Calibración guardada (precisión ≈ {result.model.cv_error:.0f} px).")
+                self._apply_timing()
+                self.tray.notify(f"Calibración guardada (precisión ≈ {self.accuracy():.0f} px).")
             if previous:
                 self.activity.ignore_injected(time.monotonic())
                 win32.activate(previous)
 
         self.calibration = CalibrationSession(self.root, self.tracker, self.monitors, self.layout,
-                                              s.calibration_cols, s.calibration_rows, done)
+                                              s.calibration_cols, s.calibration_rows,
+                                              s.validation_points, done)
         self.calibration.start()
 
     def _learn_from_clicks(self, clicks: list[tuple[int, int]], now: float) -> None:
         """A click is a free calibration sample: people look where they click."""
         if self.model is None or self.data is None:
             return
-        tolerance = max(250.0, 3 * (self.model.cv_error if self.model.cv_error == self.model.cv_error
-                                    else 150.0))
+        acc = self.accuracy()
+        tolerance = max(250.0, 3 * (acc if math.isfinite(acc) else 150.0))
         for point in clicks:
             f = self.tracker.median_features(now - 0.35, now - 0.05)
             if f is None:
@@ -301,8 +321,9 @@ class App:
         return self.filter(sample.t, raw)
 
     def _vote_radius(self) -> float:
-        err = self.model.cv_error if self.model else float("nan")
-        return 60.0 if err != err else min(160.0, max(40.0, 0.6 * err))
+        """Sample the windows around the gaze as far as the expected error reaches."""
+        acc = self.accuracy()
+        return 60.0 if not math.isfinite(acc) else min(200.0, max(40.0, 0.5 * acc))
 
     def _current_windows(self, now: float) -> list[Window]:
         if now - self._windows_at > WINDOW_CACHE_S:
@@ -379,7 +400,8 @@ class App:
         ]
         if m is not None:
             lines.append(f"Cabeza     yaw {math.degrees(m.yaw):+6.1f}°  pitch {math.degrees(m.pitch):+6.1f}°"
-                         f"  ·  ojos {m.eye_x:.3f}, {m.eye_y:+.3f}{'  (parpadeo)' if sample.blink else ''}")
+                         f"  ·  iris {m.eye_x:.3f}, {m.eye_y:+.3f}{'  (parpadeo)' if sample.blink else ''}")
+            lines.append(f"Ojos       mirada h {m.look_h:+.2f}  v {m.look_v:+.2f}")
         else:
             lines.append("Cabeza     —")
         if self.gaze is not None:
@@ -393,7 +415,9 @@ class App:
             lines.append("Ventana    —")
         lines.append(f"Bloqueo    {self.block_reason or '—'}")
         if self.model is not None:
-            lines.append(f"Modelo     error ≈ {self.model.cv_error:.0f} px  ·  "
+            lines.append(f"Modelo     error ≈ {self.accuracy():.0f} px  ·  "
                          f"{self.data.click_count if self.data else 0} clics aprendidos  ·  "
                          f"{self.switches} cambios")
+            lines.append(f"Ajuste     espera {self.decider.dwell_s * 1000:.0f} ms  ·  "
+                         f"radio {self._vote_radius():.0f} px")
         return lines

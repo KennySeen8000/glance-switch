@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
+from .features import FEATURE_COUNT
+
+# Bump whenever the feature vector changes: older calibrations are discarded.
+DATA_VERSION = 2
 # Relative ridge strengths tried by cross-validation.
 LAMBDAS = (1e-4, 1e-3, 3e-3, 1e-2, 3e-2, 0.1, 0.3, 1.0)
 CLICK_GROUP_BASE = 100_000
@@ -91,11 +96,19 @@ class CalibrationData:
     groups: np.ndarray
     weights: np.ndarray
     layout: str
+    # Mean error on fresh targets measured right after calibration (nan if not run).
+    validation_error: float = float("nan")
 
     @classmethod
     def empty(cls, layout: str) -> "CalibrationData":
-        return cls(np.zeros((0, 7)), np.zeros((0, 2)), np.zeros(0, dtype=int),
+        return cls(np.zeros((0, FEATURE_COUNT)), np.zeros((0, 2)), np.zeros(0, dtype=int),
                    np.zeros(0), layout)
+
+    def accuracy(self, model: GazeModel) -> float:
+        """Best available estimate of the real error in pixels (nan if unknown)."""
+        if math.isfinite(self.validation_error):
+            return self.validation_error
+        return model.cv_error
 
     @property
     def click_count(self) -> int:
@@ -128,8 +141,10 @@ class CalibrationData:
 
     def save(self, path: Path) -> None:
         payload = {
-            "version": 1,
+            "version": DATA_VERSION,
             "layout": self.layout,
+            "validation_error": (self.validation_error
+                                 if math.isfinite(self.validation_error) else None),
             "features": self.features.tolist(),
             "targets": self.targets.tolist(),
             "groups": self.groups.tolist(),
@@ -143,13 +158,17 @@ class CalibrationData:
     def load(cls, path: Path) -> "CalibrationData | None":
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("version") != DATA_VERSION:
+                return None
+            val = raw.get("validation_error")
             data = cls(
-                features=np.asarray(raw["features"], dtype=float).reshape(-1, 7),
+                features=np.asarray(raw["features"], dtype=float).reshape(-1, FEATURE_COUNT),
                 targets=np.asarray(raw["targets"], dtype=float).reshape(-1, 2),
                 groups=np.asarray(raw["groups"], dtype=int),
                 weights=np.asarray(raw["weights"], dtype=float),
                 layout=str(raw["layout"]),
+                validation_error=float(val) if val is not None else float("nan"),
             )
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
             return None
         return data if len(data.features) else None

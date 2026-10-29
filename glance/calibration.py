@@ -1,4 +1,4 @@
-"""Full-screen calibration: look at dots, fit the model, check it live."""
+"""Full-screen calibration: look at dots, fit the model, measure it, check it live."""
 from __future__ import annotations
 
 import logging
@@ -25,6 +25,10 @@ ACCENT = "#4f8cff"
 OK = "#3ccf8e"
 WARN = "#f5a524"
 
+# Validation targets as monitor fractions: deliberately off the calibration grid.
+_VALIDATION_LAYOUT = ((0.5, 0.5), (0.2, 0.22), (0.8, 0.22), (0.8, 0.78), (0.2, 0.78),
+                      (0.5, 0.2), (0.5, 0.8), (0.15, 0.5), (0.85, 0.5))
+
 
 def grid_points(monitors: list[Rect], cols: int, rows: int,
                 margin: float = 0.08) -> list[tuple[float, float]]:
@@ -40,10 +44,23 @@ def grid_points(monitors: list[Rect], cols: int, rows: int,
     return points
 
 
+def validation_points(monitors: list[Rect], count: int) -> list[tuple[float, float]]:
+    count = max(0, min(count, len(_VALIDATION_LAYOUT)))
+    return [(mon.left + fx * mon.width, mon.top + fy * mon.height)
+            for mon in sorted(monitors, key=lambda r: (r.left, r.top))
+            for fx, fy in _VALIDATION_LAYOUT[:count]]
+
+
 @dataclass
 class CalibrationResult:
     data: gaze.CalibrationData
     model: gaze.GazeModel
+
+
+@dataclass
+class _Measured:
+    target: tuple[float, float]
+    features: np.ndarray
 
 
 class CalibrationSession:
@@ -54,14 +71,16 @@ class CalibrationSession:
     TICK_MS = 16
 
     def __init__(self, root: tk.Tk, tracker: Tracker, monitors: list[Rect], layout: str,
-                 cols: int, rows: int, on_done: Callable[[CalibrationResult | None], None]):
+                 cols: int, rows: int, validation: int,
+                 on_done: Callable[[CalibrationResult | None], None]):
         self.tracker = tracker
         self.monitors = monitors
         self.layout = layout
         self.on_done = on_done
         self.virtual = Rect.union(monitors)
         self.primary = next((m for m in monitors if m.contains(0, 0)), monitors[0])
-        self.points = grid_points(monitors, cols, rows)
+        self.cal_points = grid_points(monitors, cols, rows)
+        self.val_points = validation_points(monitors, validation)
 
         self.top = tk.Toplevel(root)
         self.top.overrideredirect(True)
@@ -74,7 +93,7 @@ class CalibrationSession:
         for key in ("<Escape>", "<space>", "<Return>", "<KeyPress-r>", "<KeyPress-R>"):
             self.top.bind(key, self._on_key)
 
-        self.state = "intro"
+        self.state = "intro"  # intro -> calibrate -> validate -> review (or failed)
         self._job: str | None = None
         self._finished = False
         self._reset_run()
@@ -91,11 +110,14 @@ class CalibrationSession:
 
     def _reset_run(self) -> None:
         self.data = gaze.CalibrationData.empty(self.layout)
+        self.measured: list[_Measured] = []
+        self.targets: list[tuple[float, float]] = []
         self.index = 0
         self.retries: dict[int, int] = {}
         self.point_start = 0.0
         self.prev_point = self._center(self.primary)
         self.collected = 0
+        self.model: gaze.GazeModel | None = None
         self.result: CalibrationResult | None = None
         self.filter = OneEuro()
 
@@ -142,7 +164,7 @@ class CalibrationSession:
             self._finish(None)
         elif self.state == "intro" and key in ("space", "return"):
             if self.tracker.status == "ok":
-                self._begin_points()
+                self._begin("calibrate", self.cal_points)
         elif self.state in ("review", "failed") and key == "r":
             self._reset_run()
             self.state = "intro"
@@ -155,13 +177,13 @@ class CalibrationSession:
     def _draw_intro(self) -> None:
         self.canvas.delete("all")
         cx, cy = self._center(self.primary)
+        total = len(self.cal_points) + len(self.val_points)
+        seconds = math.ceil(total * (self.SETTLE_S + self.COLLECT_S))
         self._text(cx, cy - 120, "Calibración", 30, weight="bold")
         self._text(cx, cy - 50,
                    "Sigue con la mirada el punto azul y míralo fijamente hasta que se cierre.\n"
                    "Mueve la cabeza con naturalidad, como cuando trabajas.", 15, MUTED)
-        self._text(cx, cy + 40, f"{len(self.points)} puntos · unos "
-                   f"{math.ceil(len(self.points) * (self.SETTLE_S + self.COLLECT_S))} segundos",
-                   13, MUTED)
+        self._text(cx, cy + 40, f"{total} puntos · unos {seconds} segundos", 13, MUTED)
         self._text(cx, cy + 110, "Pulsa  Espacio  para empezar  ·  Esc  para cancelar", 15)
 
     def _update_intro(self) -> None:
@@ -170,14 +192,21 @@ class CalibrationSession:
         line, color = self._face_line()
         self._text(cx, cy + 170, line, 13, color, tag="face")
 
-    def _begin_points(self) -> None:
-        self.state = "points"
+    def _begin(self, state: str, targets: list[tuple[float, float]]) -> None:
+        self.state = state
         self.canvas.delete("all")
+        self.targets = targets
         self.index = 0
+        self.retries = {}
         self.point_start = time.monotonic()
+        if state == "validate":
+            cx, cy = self._center(self.primary)
+            self._text(cx, cy - 60, "Ahora unos puntos más para medir la precisión real",
+                       15, MUTED, tag="hint")
+            self.top.after(1400, lambda: self.canvas.delete("hint"))
 
     def _update_points(self, now: float) -> None:
-        target = self.points[self.index]
+        target = self.targets[self.index]
         t = now - self.point_start
         self.canvas.delete("dot")
 
@@ -193,9 +222,10 @@ class CalibrationSession:
             progress = min(1.0, hold / self.COLLECT_S)
             radius = 16 - 9 * progress
 
+        color = ACCENT if self.state == "calibrate" else OK
         lx, ly = self._local(x, y)
         self.canvas.create_oval(lx - radius, ly - radius, lx + radius, ly + radius,
-                                fill=ACCENT, outline="", tags="dot")
+                                fill=color, outline="", tags="dot")
         self.canvas.create_oval(lx - 3, ly - 3, lx + 3, ly + 3, fill="#ffffff", outline="",
                                 tags="dot")
         if progress > 0:
@@ -203,67 +233,114 @@ class CalibrationSession:
             self.canvas.create_arc(lx - r, ly - r, lx + r, ly + r, start=90,
                                    extent=-359.9 * progress, style="arc", outline=FG, width=2,
                                    tags="dot")
+        self.canvas.delete("face")
         if self.tracker.status != "ok":
             line, color = self._face_line()
             cx, cy = self._center(self.primary)
-            self.canvas.delete("face")
             self._text(cx, cy, line, 14, color, tag="face")
-        else:
-            self.canvas.delete("face")
 
         if t >= self.SETTLE_S + self.COLLECT_S:
             self._collect(target)
 
-    def _collect(self, target) -> None:
+    def _point_features(self) -> np.ndarray | None:
+        """Steady-fixation frames of the current point, outliers removed."""
         t0 = self.point_start + self.SETTLE_S
         rows = [s.features for s in self.tracker.window(t0, t0 + self.COLLECT_S)
                 if s.features is not None and not s.blink]
-        if len(rows) >= self.MIN_SAMPLES:
-            F = np.asarray(rows)
-            # Drop the outlying frames (late saccades) before keeping the point.
-            med = np.median(F, axis=0)
-            spread = np.median(np.abs(F - med), axis=0) + 1e-9
-            keep = (np.abs(F - med) / spread < 4).all(axis=1)
-            if keep.sum() >= self.MIN_SAMPLES:
-                F = F[keep]
-            self.data.add(F, target, self.index)
-            self.collected += 1
-        elif self.retries.get(self.index, 0) < 1:
+        if len(rows) < self.MIN_SAMPLES:
+            return None
+        F = np.asarray(rows)
+        med = np.median(F, axis=0)
+        spread = np.median(np.abs(F - med), axis=0) + 1e-9
+        keep = (np.abs(F - med) / spread < 4).all(axis=1)
+        return F[keep] if keep.sum() >= self.MIN_SAMPLES else F
+
+    def _collect(self, target) -> None:
+        F = self._point_features()
+        if F is None and self.retries.get(self.index, 0) < 1:
             self.retries[self.index] = 1
             self.point_start = time.monotonic()
             self.prev_point = target
             return
+        if F is not None:
+            if self.state == "calibrate":
+                self.data.add(F, target, self.index)
+                self.collected += 1
+            else:
+                self.measured.append(_Measured(target, F))
         self.prev_point = target
         self.index += 1
         self.point_start = time.monotonic()
-        if self.index >= len(self.points):
-            self._fit()
+        if self.index < len(self.targets):
+            return
+        if self.state == "calibrate":
+            self._fit_calibration()
+        else:
+            self._finish_validation()
 
-    def _fit(self) -> None:
-        needed = max(6, int(len(self.points) * 0.6))
+    def _fit_calibration(self) -> None:
+        needed = max(6, int(len(self.cal_points) * 0.6))
         if self.collected < needed:
-            self._fail(f"Solo se pudieron medir {self.collected} de {len(self.points)} puntos.")
+            self._fail(f"Solo se pudieron medir {self.collected} de {len(self.cal_points)} puntos.")
             return
         try:
-            fitted = self.data.fit()
+            self.model = self.data.fit()
         except (ValueError, np.linalg.LinAlgError):
             log.exception("Calibration fit failed")
             self._fail("No se pudo calcular el modelo de mirada.")
             return
-        self.result = CalibrationResult(self.data, fitted)
         log.info("Calibrated: %d points, cv error %.0f px, lambda %g",
-                 self.collected, fitted.cv_error, fitted.lam)
+                 self.collected, self.model.cv_error, self.model.lam)
+        if self.val_points:
+            self._begin("validate", self.val_points)
+        else:
+            self._show_review(self.model.cv_error, None)
+
+    def _finish_validation(self) -> None:
+        assert self.model is not None
+        if len(self.measured) < max(2, len(self.val_points) // 2):
+            # Not enough fresh points: fall back to the cross-validated estimate.
+            self._show_review(self.model.cv_error, None)
+            return
+        errors = []
+        axis = []
+        for m in self.measured:
+            pred = self.model.predict(m.features)
+            d = pred - np.asarray(m.target)
+            errors.append(float(np.mean(np.linalg.norm(d, axis=1))))
+            axis.append(np.mean(np.abs(d), axis=0))
+        measured = float(np.mean(errors))
+        dx, dy = np.mean(axis, axis=0)
+        log.info("Validation: %.0f px on %d fresh points (horizontal %.0f, vertical %.0f)",
+                 measured, len(self.measured), dx, dy)
+        # The fresh points are good training data too: refit with everything.
+        base = len(self.cal_points)
+        for i, m in enumerate(self.measured):
+            self.data.add(m.features, m.target, base + i)
+        self.data.validation_error = measured
+        try:
+            self.model = self.data.fit()
+        except (ValueError, np.linalg.LinAlgError):
+            log.warning("Refit with validation points failed; keeping the first model",
+                        exc_info=True)
+        self._show_review(measured, (dx, dy))
+
+    def _show_review(self, err: float, axis: tuple[float, float] | None) -> None:
+        self.result = CalibrationResult(self.data, self.model)
         self.state = "review"
         self.canvas.delete("all")
         cx, cy = self._center(self.primary)
-        err = fitted.cv_error
         quality = ("excelente" if err < 120 else "buena" if err < 200
                    else "aceptable" if err < 300 else "baja")
-        self._text(cx, cy - 90, "Calibración completada", 26, weight="bold")
-        self._text(cx, cy - 40, f"Precisión estimada ≈ {err:.0f} px  ({quality})", 16,
+        label = "Precisión medida" if axis else "Precisión estimada"
+        self._text(cx, cy - 100, "Calibración completada", 26, weight="bold")
+        self._text(cx, cy - 50, f"{label} ≈ {err:.0f} px  ({quality})", 16,
                    OK if err < 200 else WARN)
-        self._text(cx, cy + 10, "Mira por la pantalla: el círculo sigue tu mirada.", 14, MUTED)
-        self._text(cx, cy + 60, "Espacio  guardar   ·   R  repetir   ·   Esc  cancelar", 15)
+        if axis:
+            self._text(cx, cy - 18, f"horizontal ≈ {axis[0]:.0f} px  ·  vertical ≈ {axis[1]:.0f} px",
+                       12, MUTED)
+        self._text(cx, cy + 20, "Mira por la pantalla: el círculo sigue tu mirada.", 14, MUTED)
+        self._text(cx, cy + 70, "Espacio  guardar   ·   R  repetir   ·   Esc  cancelar", 15)
 
     def _fail(self, reason: str) -> None:
         self.state = "failed"
@@ -298,7 +375,7 @@ class CalibrationSession:
             now = time.monotonic()
             if self.state == "intro":
                 self._update_intro()
-            elif self.state == "points":
+            elif self.state in ("calibrate", "validate"):
                 self._update_points(now)
             elif self.state == "review":
                 self._update_review()

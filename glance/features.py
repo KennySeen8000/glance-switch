@@ -11,7 +11,9 @@ import numpy as np
 # in image space so their horizontal ratios share a sign.
 RIGHT_EYE = (33, 133, 159, 145, 468)
 LEFT_EYE = (362, 263, 386, 374, 473)
-FEATURE_NAMES = ("yaw", "pitch", "eye_x", "eye_y", "head_x", "head_y", "head_z")
+FEATURE_NAMES = ("yaw", "pitch", "eye_x", "eye_y", "look_h", "look_v",
+                 "head_x", "head_y", "head_z")
+FEATURE_COUNT = len(FEATURE_NAMES)
 BLINK_OPENNESS = 0.12
 
 
@@ -21,6 +23,10 @@ class FaceMeasure:
     pitch: float
     eye_x: float
     eye_y: float
+    # Gaze direction from MediaPipe's eyeLook* blendshapes: a learned estimate
+    # that is less jittery than the raw iris landmark at webcam resolution.
+    look_h: float
+    look_v: float
     head: tuple[float, float, float]
     openness: float
 
@@ -28,9 +34,14 @@ class FaceMeasure:
     def blinking(self) -> bool:
         return self.openness < BLINK_OPENNESS
 
-    def vector(self, eye: tuple[float, float] | None = None) -> np.ndarray:
-        ex, ey = eye if eye is not None else (self.eye_x, self.eye_y)
-        return np.array([self.yaw, self.pitch, ex, ey, *self.head], dtype=float)
+    @property
+    def eyes(self) -> tuple[float, float, float, float]:
+        return self.eye_x, self.eye_y, self.look_h, self.look_v
+
+    def vector(self, eyes: tuple[float, float, float, float] | None = None) -> np.ndarray:
+        """Feature vector; `eyes` replaces the eye terms (used to hold them during blinks)."""
+        ex, ey, lh, lv = eyes if eyes is not None else self.eyes
+        return np.array([self.yaw, self.pitch, ex, ey, lh, lv, *self.head], dtype=float)
 
 
 def head_pose(matrix) -> tuple[float, float, tuple[float, float, float]]:
@@ -59,7 +70,24 @@ def eye_metrics(pts: np.ndarray, idx) -> tuple[float, float, float] | None:
     return x, y, openness
 
 
-def measure(pts: np.ndarray, matrix) -> FaceMeasure | None:
+def look_direction(blendshapes: dict[str, float] | None) -> tuple[float, float]:
+    """Horizontal/vertical gaze from blendshapes ("Left" = the subject's left eye).
+
+    Looking to the subject's left turns the left eye outwards and the right
+    eye inwards, so both terms add up with the same sign.
+    """
+    if not blendshapes:
+        return 0.0, 0.0
+    b = blendshapes.get
+    h = (b("eyeLookOutLeft", 0.0) - b("eyeLookInLeft", 0.0)
+         + b("eyeLookInRight", 0.0) - b("eyeLookOutRight", 0.0)) / 2
+    v = (b("eyeLookUpLeft", 0.0) + b("eyeLookUpRight", 0.0)
+         - b("eyeLookDownLeft", 0.0) - b("eyeLookDownRight", 0.0)) / 2
+    return h, v
+
+
+def measure(pts: np.ndarray, matrix, blendshapes: dict[str, float] | None = None
+            ) -> FaceMeasure | None:
     """`pts` are landmark positions in pixels (so the aspect ratio is right)."""
     if len(pts) < 478:
         return None
@@ -68,11 +96,14 @@ def measure(pts: np.ndarray, matrix) -> FaceMeasure | None:
     if right is None or left is None:
         return None
     yaw, pitch, head = head_pose(matrix)
+    look_h, look_v = look_direction(blendshapes)
     return FaceMeasure(
         yaw=yaw,
         pitch=pitch,
         eye_x=(right[0] + left[0]) / 2,
         eye_y=(right[1] + left[1]) / 2,
+        look_h=look_h,
+        look_v=look_v,
         head=head,
         openness=min(right[2], left[2]),
     )

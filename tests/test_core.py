@@ -3,7 +3,7 @@ import pytest
 
 from glance import features
 from glance.app import vote
-from glance.calibration import grid_points
+from glance.calibration import grid_points, validation_points
 from glance.decider import Decider
 from glance.filters import OneEuro
 from glance.hotkeys import parse
@@ -14,7 +14,7 @@ from glance.win32 import Rect, Window
 def synthetic(n_targets=12, per=12, noise=0.004, seed=0):
     """Targets on a 1920x1080 screen produced by a smooth head/eye model."""
     rng = np.random.default_rng(seed)
-    pts = grid_points([Rect(0, 0, 1920, 1080)], 4, 3)[:n_targets]
+    pts = grid_points([Rect(0, 0, 1920, 1080)], 5, 4)[:n_targets]
     F, Y, G = [], [], []
     for g, (x, y) in enumerate(pts):
         u, v = (x - 960) / 960, (y - 540) / 540
@@ -23,7 +23,9 @@ def synthetic(n_targets=12, per=12, noise=0.004, seed=0):
             pitch = -0.15 * v + rng.normal(0, noise)
             ex = 0.5 + 0.06 * u + rng.normal(0, noise / 2)
             ey = 0.04 * v + rng.normal(0, noise / 2)
-            F.append([yaw, pitch, ex, ey, 0.5, -1.0, -45.0])
+            lh = 0.4 * u + rng.normal(0, noise * 4)
+            lv = 0.3 * v + rng.normal(0, noise * 4)
+            F.append([yaw, pitch, ex, ey, lh, lv, 0.5, -1.0, -45.0])
             Y.append([x, y])
             G.append(g)
     return np.array(F), np.array(Y), np.array(G)
@@ -109,6 +111,63 @@ def test_eye_metrics_centre_and_blink():
     for _, _, top, bottom, _ in (features.RIGHT_EYE, features.LEFT_EYE):
         pts[top], pts[bottom] = (15, -1), (15, 1)
     assert features.measure(pts, np.eye(4)).blinking
+
+
+def test_look_direction_signs_and_vector_size():
+    left_gaze = {"eyeLookOutLeft": 0.8, "eyeLookInRight": 0.6}
+    up_gaze = {"eyeLookUpLeft": 0.5, "eyeLookUpRight": 0.5}
+    assert features.look_direction(left_gaze)[0] > 0.5
+    assert features.look_direction(up_gaze) == pytest.approx((0.0, 0.5))
+    assert features.look_direction(None) == (0.0, 0.0)
+    pts = np.zeros((478, 2))
+    for left, right, top, bottom, iris in (features.RIGHT_EYE, features.LEFT_EYE):
+        pts[left], pts[right], pts[top], pts[bottom], pts[iris] = (0, 0), (30, 0), (15, -5), (15, 5), (15, 0)
+    m = features.measure(pts, np.eye(4), up_gaze)
+    assert m.vector().shape == (features.FEATURE_COUNT,)
+    held = m.vector((0.1, 0.2, 0.3, 0.4))
+    assert list(held[2:6]) == [0.1, 0.2, 0.3, 0.4]
+
+
+def test_old_calibration_version_is_rejected(tmp_path):
+    path = tmp_path / "c.json"
+    path.write_text('{"version": 1, "layout": "x", "features": [[0,0,0,0,0,0,0]],'
+                    ' "targets": [[1,1]], "groups": [0], "weights": [1]}', encoding="utf-8")
+    assert CalibrationData.load(path) is None
+
+
+def test_validation_error_roundtrip_and_accuracy(tmp_path):
+    F, Y, G = synthetic()
+    data = CalibrationData.empty("l")
+    for g in np.unique(G):
+        data.add(F[G == g], Y[G == g][0], int(g))
+    m = data.fit()
+    assert data.accuracy(m) == m.cv_error  # no validation yet
+    data.validation_error = 123.0
+    data.save(tmp_path / "c.json")
+    loaded = CalibrationData.load(tmp_path / "c.json")
+    assert loaded.validation_error == 123.0
+    assert loaded.accuracy(m) == 123.0
+
+
+def test_validation_points_avoid_calibration_grid():
+    mon = [Rect(0, 0, 1920, 1080)]
+    grid = grid_points(mon, 5, 4)
+    val = validation_points(mon, 5)
+    assert len(grid) == 20 and len(val) == 5
+    nearest = min(np.hypot(vx - gx, vy - gy) for vx, vy in val for gx, gy in grid)
+    assert nearest > 40
+
+
+def test_settings_migration_upgrades_old_grid(tmp_path, monkeypatch):
+    import json
+    from glance import config
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    (tmp_path / "GlanceSwitch").mkdir()
+    (tmp_path / "GlanceSwitch" / "settings.json").write_text(
+        json.dumps({"calibration_cols": 4, "calibration_rows": 3, "dwell_ms": 200}), encoding="utf-8")
+    s = config.Settings.load()
+    assert (s.calibration_cols, s.calibration_rows, s.dwell_ms) == (5, 4, 200)
+    assert json.loads((tmp_path / "GlanceSwitch" / "settings.json").read_text())["settings_version"] == 2
 
 
 def test_hotkey_parse():

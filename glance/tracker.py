@@ -46,7 +46,7 @@ class Tracker(threading.Thread):
         self._lock = threading.Lock()
         self._history: deque[Sample] = deque()
         self._stop_event = threading.Event()
-        self._last_eye: tuple[float, float] | None = None
+        self._last_eye: tuple[float, float, float, float] | None = None
         self._last_ts_ms = 0
         self.status = "starting"  # starting | no_camera | dark | no_face | ok
         self.fps = 0.0
@@ -83,6 +83,7 @@ class Tracker(threading.Thread):
             min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
             output_facial_transformation_matrixes=True,
+            output_face_blendshapes=True,
         )
         with vision.FaceLandmarker.create_from_options(options) as landmarker:
             while not self._stop_event.is_set():
@@ -150,7 +151,9 @@ class Tracker(threading.Thread):
         if result.face_landmarks and result.facial_transformation_matrixes:
             h, w = frame.shape[:2]
             pts = np.array([(p.x * w, p.y * h) for p in result.face_landmarks[0]])
-            face = features.measure(pts, result.facial_transformation_matrixes[0])
+            shapes = ({c.category_name: c.score for c in result.face_blendshapes[0]}
+                      if result.face_blendshapes else None)
+            face = features.measure(pts, result.facial_transformation_matrixes[0], shapes)
 
         sample = self._to_sample(now, face)
         with self._lock:
@@ -169,8 +172,8 @@ class Tracker(threading.Thread):
         if face is None:
             return Sample(now, None)
         if face.blinking:
-            # Closed lids make the iris estimate jump; hold the last open-eye value.
+            # Closed lids make the eye estimates jump; hold the last open-eye values.
             vec = face.vector(self._last_eye) if self._last_eye else None
             return Sample(now, vec, face, blink=True)
-        self._last_eye = (face.eye_x, face.eye_y)
+        self._last_eye = face.eyes
         return Sample(now, face.vector(), face)

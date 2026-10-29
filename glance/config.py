@@ -17,6 +17,7 @@ MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
     "face_landmarker/float16/1/face_landmarker.task"
 )
+SETTINGS_VERSION = 2
 
 
 def data_dir() -> Path:
@@ -71,10 +72,13 @@ class Settings:
     flash_on_switch: bool = True
     learn_from_clicks: bool = True
     pause_on_fullscreen: bool = True
-    calibration_cols: int = 4
-    calibration_rows: int = 3
+    calibration_cols: int = 5
+    calibration_rows: int = 4
+    # Fresh targets shown after calibration to measure the real accuracy.
+    validation_points: int = 5
     hotkey_toggle: str = "ctrl+alt+g"
     hotkey_calibrate: str = "ctrl+alt+k"
+    settings_version: int = SETTINGS_VERSION
 
     @classmethod
     def path(cls) -> Path:
@@ -90,11 +94,25 @@ class Settings:
         except (OSError, ValueError):
             log.warning("Ignoring unreadable settings file", exc_info=True)
             return settings
-        known = {f.name: f.type for f in fields(cls)}
+        known = {f.name for f in fields(cls)}
         for key, value in raw.items():
             if key in known and isinstance(value, type(getattr(settings, key))):
                 setattr(settings, key, value)
+        if raw.get("settings_version", 1) < SETTINGS_VERSION:
+            settings._migrate(raw.get("settings_version", 1))
         return settings
+
+    def _migrate(self, from_version: int) -> None:
+        defaults = Settings()
+        if from_version < 2:
+            # v2 calibrates on a denser grid; files saved by v1 hold the old 4x3.
+            self.calibration_cols = defaults.calibration_cols
+            self.calibration_rows = defaults.calibration_rows
+        self.settings_version = SETTINGS_VERSION
+        try:
+            self.save()
+        except OSError:
+            log.warning("Could not save migrated settings", exc_info=True)
 
     def save(self) -> None:
         tmp = self.path().with_suffix(".tmp")
