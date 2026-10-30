@@ -7,8 +7,8 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 
-from . import APP_NAME, DISPLAY_NAME, __version__, win32
-from .config import data_dir
+from . import APP_NAME, DISPLAY_NAME, __version__, i18n, win32
+from .config import Settings, data_dir
 
 
 def setup_logging(verbose: bool) -> None:
@@ -32,9 +32,9 @@ def main() -> int:
     args = parser.parse_args()
 
     setup_logging(args.verbose)
+    i18n.set_language(Settings.load().language)
     if not win32.acquire_single_instance(APP_NAME):
-        win32.message_box(f"{DISPLAY_NAME} ya se está ejecutando (mira la bandeja del sistema).",
-                          DISPLAY_NAME)
+        win32.message_box(i18n.t("already_running", name=DISPLAY_NAME), DISPLAY_NAME)
         return 1
     win32.set_dpi_awareness()
 
@@ -44,8 +44,8 @@ def main() -> int:
         App().run()
     except Exception:
         logging.getLogger(__name__).exception("Fatal error")
-        win32.message_box(f"{DISPLAY_NAME} se cerró por un error. Detalles en:\n"
-                          f"{data_dir() / 'glance.log'}", DISPLAY_NAME)
+        win32.message_box(i18n.t("crashed", name=DISPLAY_NAME, path=data_dir() / "glance.log"),
+                          DISPLAY_NAME)
         return 1
     return 0
 

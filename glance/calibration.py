@@ -13,6 +13,7 @@ import numpy as np
 from . import model as gaze
 from . import win32
 from .filters import OneEuro
+from .i18n import t
 from .tracker import Tracker
 from .win32 import Rect
 
@@ -147,14 +148,14 @@ class CalibrationSession:
     def _face_line(self) -> tuple[str, str]:
         status = self.tracker.status
         if status == "ok":
-            return "● Cara detectada", OK
+            return t("face_ok"), OK
         if status == "no_camera":
-            return "● No se puede abrir la cámara", WARN
+            return t("face_no_camera"), WARN
         if status == "dark":
-            return "● La cámara se ve negra: ¿está tapada la tapa de privacidad?", WARN
+            return t("face_dark"), WARN
         if status == "starting":
-            return "● Iniciando cámara…", MUTED
-        return "● No se detecta tu cara: colócate frente a la cámara", WARN
+            return t("face_starting"), MUTED
+        return t("face_missing"), WARN
 
     # --- input -----------------------------------------------------------
 
@@ -179,12 +180,10 @@ class CalibrationSession:
         cx, cy = self._center(self.primary)
         total = len(self.cal_points) + len(self.val_points)
         seconds = math.ceil(total * (self.SETTLE_S + self.COLLECT_S))
-        self._text(cx, cy - 120, "Calibración", 30, weight="bold")
-        self._text(cx, cy - 50,
-                   "Sigue con la mirada el punto azul y míralo fijamente hasta que se cierre.\n"
-                   "Mueve la cabeza con naturalidad, como cuando trabajas.", 15, MUTED)
-        self._text(cx, cy + 40, f"{total} puntos · unos {seconds} segundos", 13, MUTED)
-        self._text(cx, cy + 110, "Pulsa  Espacio  para empezar  ·  Esc  para cancelar", 15)
+        self._text(cx, cy - 120, t("calib_title"), 30, weight="bold")
+        self._text(cx, cy - 50, t("calib_intro"), 15, MUTED)
+        self._text(cx, cy + 40, t("calib_length", points=total, seconds=seconds), 13, MUTED)
+        self._text(cx, cy + 110, t("calib_start_keys"), 15)
 
     def _update_intro(self) -> None:
         self.canvas.delete("face")
@@ -201,8 +200,7 @@ class CalibrationSession:
         self.point_start = time.monotonic()
         if state == "validate":
             cx, cy = self._center(self.primary)
-            self._text(cx, cy - 60, "Ahora unos puntos más para medir la precisión real",
-                       15, MUTED, tag="hint")
+            self._text(cx, cy - 60, t("calib_validate_hint"), 15, MUTED, tag="hint")
             self.top.after(1400, lambda: self.canvas.delete("hint"))
 
     def _update_points(self, now: float) -> None:
@@ -281,13 +279,13 @@ class CalibrationSession:
     def _fit_calibration(self) -> None:
         needed = max(6, int(len(self.cal_points) * 0.6))
         if self.collected < needed:
-            self._fail(f"Solo se pudieron medir {self.collected} de {len(self.cal_points)} puntos.")
+            self._fail(t("calib_too_few", measured=self.collected, total=len(self.cal_points)))
             return
         try:
             self.model = self.data.fit()
         except (ValueError, np.linalg.LinAlgError):
             log.exception("Calibration fit failed")
-            self._fail("No se pudo calcular el modelo de mirada.")
+            self._fail(t("calib_fit_failed"))
             return
         log.info("Calibrated: %d points, cv error %.0f px, lambda %g",
                  self.collected, self.model.cv_error, self.model.lam)
@@ -330,26 +328,26 @@ class CalibrationSession:
         self.state = "review"
         self.canvas.delete("all")
         cx, cy = self._center(self.primary)
-        quality = ("excelente" if err < 120 else "buena" if err < 200
-                   else "aceptable" if err < 300 else "baja")
-        label = "Precisión medida" if axis else "Precisión estimada"
-        self._text(cx, cy - 100, "Calibración completada", 26, weight="bold")
+        quality = t("quality_excellent" if err < 120 else "quality_good" if err < 200
+                    else "quality_acceptable" if err < 300 else "quality_low")
+        label = t("accuracy_measured" if axis else "accuracy_estimated")
+        self._text(cx, cy - 100, t("calib_done"), 26, weight="bold")
         self._text(cx, cy - 50, f"{label} ≈ {err:.0f} px  ({quality})", 16,
                    OK if err < 200 else WARN)
         if axis:
             self._text(cx, cy - 18, f"horizontal ≈ {axis[0]:.0f} px  ·  vertical ≈ {axis[1]:.0f} px",
                        12, MUTED)
-        self._text(cx, cy + 20, "Mira por la pantalla: el círculo sigue tu mirada.", 14, MUTED)
-        self._text(cx, cy + 70, "Espacio  guardar   ·   R  repetir   ·   Esc  cancelar", 15)
+        self._text(cx, cy + 20, t("calib_follow"), 14, MUTED)
+        self._text(cx, cy + 70, t("calib_review_keys"), 15)
 
     def _fail(self, reason: str) -> None:
         self.state = "failed"
         self.canvas.delete("all")
         cx, cy = self._center(self.primary)
-        self._text(cx, cy - 40, "La calibración no salió bien", 24, WARN, "bold")
-        self._text(cx, cy + 10, reason + "\nComprueba la luz y que la cámara te vea de frente.",
+        self._text(cx, cy - 40, t("calib_failed"), 24, WARN, "bold")
+        self._text(cx, cy + 10, reason + "\n" + t("calib_failed_hint"),
                    14, MUTED)
-        self._text(cx, cy + 80, "R  repetir   ·   Esc  cancelar", 15)
+        self._text(cx, cy + 80, t("calib_failed_keys"), 15)
 
     def _update_review(self) -> None:
         self.canvas.delete("dot")

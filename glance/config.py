@@ -78,6 +78,8 @@ class Settings:
     validation_points: int = 5
     hotkey_toggle: str = "ctrl+alt+g"
     hotkey_calibrate: str = "ctrl+alt+k"
+    # Interface language: a key of i18n.LANGUAGES.
+    language: str = "es"
     settings_version: int = SETTINGS_VERSION
 
     @classmethod

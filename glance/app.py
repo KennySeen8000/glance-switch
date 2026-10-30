@@ -10,13 +10,14 @@ import tkinter as tk
 
 import numpy as np
 
-from . import DISPLAY_NAME, startup, win32
+from . import DISPLAY_NAME, i18n, startup, win32
 from .activity import Activity
 from .calibration import CalibrationResult, CalibrationSession
 from .config import Settings, data_dir, face_model_bytes
 from .decider import Decider
 from .filters import OneEuro
 from .hotkeys import HotkeyThread
+from .i18n import t
 from .model import CalibrationData, GazeModel
 from .overlay import Overlay
 from .preview import Preview
@@ -59,6 +60,7 @@ class App:
 
     def __init__(self):
         self.settings = Settings.load()
+        i18n.set_language(self.settings.language)
         self.root = tk.Tk()
         self.root.withdraw()
         self.commands: queue.Queue[str] = queue.Queue()
@@ -115,8 +117,7 @@ class App:
         if self.model is None:
             self.root.after(1500, self._first_run)
         elif self.data.layout != self.layout:
-            self.root.after(1500, lambda: self.tray.notify(
-                "Tus pantallas han cambiado. Recalibra para mejor precisión."))
+            self.root.after(1500, lambda: self.tray.notify(t("displays_changed")))
         self.root.after(self.TICK_MS, self._tick)
         log.info("%s running (%d monitor(s): %s)", DISPLAY_NAME, len(self.monitors), self.layout)
         self.root.mainloop()
@@ -125,9 +126,9 @@ class App:
 
     def _first_run(self) -> None:
         if self.calib_path.exists():
-            self.tray.notify("Nueva versión con mejor precisión: hay que calibrar otra vez.")
+            self.tray.notify(t("recalibrate_new_version"))
         else:
-            self.tray.notify("Vamos a calibrar la mirada. Tarda unos 40 segundos.")
+            self.tray.notify(t("first_calibration"))
         self.start_calibration()
 
     def post(self, command: str) -> None:
@@ -180,6 +181,11 @@ class App:
             s.dwell_ms = int(command.split(":", 1)[1])
             s.save()
             self._apply_timing()
+        elif command.startswith("lang:"):
+            s.language = command.split(":", 1)[1]
+            s.save()
+            i18n.set_language(s.language)
+            self.tray.rebuild_menu()
         elif command == "startup":
             startup.set_enabled(not startup.is_enabled())
         elif command == "open_folder":
@@ -227,7 +233,7 @@ class App:
                 self.data.save(self.calib_path)
                 self.filter.reset()
                 self._apply_timing()
-                self.tray.notify(f"Calibración guardada (precisión ≈ {self.accuracy():.0f} px).")
+                self.tray.notify(t("calibration_saved", accuracy=self.accuracy()))
             if previous:
                 self.activity.ignore_injected(time.monotonic())
                 win32.activate(previous)
@@ -334,13 +340,13 @@ class App:
     def _blocked_reason(self, now: float) -> str:
         s, a = self.settings, self.activity
         if a.buttons_down:
-            return "botón del ratón pulsado"
+            return t("block_mouse_button")
         if now - a.last_mouse < s.mouse_grace_ms / 1000:
-            return "usando el ratón"
+            return t("block_mouse")
         if now - a.last_key < s.typing_grace_ms / 1000:
-            return "escribiendo"
+            return t("block_typing")
         if s.pause_on_fullscreen and win32.is_fullscreen(win32.foreground()):
-            return "app a pantalla completa"
+            return t("block_fullscreen")
         return ""
 
     def _switch_to(self, hwnd: int, now: float) -> None:
@@ -368,25 +374,25 @@ class App:
         self.monitors, self.layout = monitors, layout
         self.virtual = Rect.union(monitors)
         self.overlay.relayout(self.virtual)
-        self.tray.notify("Tus pantallas han cambiado. Recalibra para mejor precisión.")
+        self.tray.notify(t("displays_changed"))
 
     # --- status ----------------------------------------------------------
 
     def _status(self) -> tuple[str, str]:
         if not self.settings.enabled:
-            return "off", f"{DISPLAY_NAME}: en pausa"
+            return "off", t("status_paused", name=DISPLAY_NAME)
         status = self.tracker.status
         if status == "no_camera":
-            return "warn", f"{DISPLAY_NAME}: no se puede abrir la cámara"
+            return "warn", t("status_no_camera", name=DISPLAY_NAME)
         if status == "dark":
-            return "warn", f"{DISPLAY_NAME}: la cámara se ve negra (¿tapa de privacidad?)"
+            return "warn", t("status_dark", name=DISPLAY_NAME)
         if self.model is None:
-            return "warn", f"{DISPLAY_NAME}: falta calibrar"
+            return "warn", t("status_needs_calibration", name=DISPLAY_NAME)
         if status == "no_face":
-            return "warn", f"{DISPLAY_NAME}: no se detecta tu cara"
+            return "warn", t("status_no_face", name=DISPLAY_NAME)
         if status == "starting":
-            return "warn", f"{DISPLAY_NAME}: iniciando cámara…"
-        return "ok", f"{DISPLAY_NAME}: activo"
+            return "warn", t("status_starting", name=DISPLAY_NAME)
+        return "ok", t("status_active", name=DISPLAY_NAME)
 
     def _update_tray(self) -> None:
         self.tray.set_state(*self._status())
@@ -395,29 +401,30 @@ class App:
         sample = self.tracker.latest()
         m = sample.measure if sample else None
         lines = [
-            f"Estado     {self._status()[1]}",
-            f"Cámara     {self.tracker.status}  ·  {self.tracker.fps:4.1f} fps",
+            t("diag_status") + self._status()[1],
+            t("diag_camera") + f"{self.tracker.status}  ·  {self.tracker.fps:4.1f} fps",
         ]
         if m is not None:
-            lines.append(f"Cabeza     yaw {math.degrees(m.yaw):+6.1f}°  pitch {math.degrees(m.pitch):+6.1f}°"
-                         f"  ·  iris {m.eye_x:.3f}, {m.eye_y:+.3f}{'  (parpadeo)' if sample.blink else ''}")
-            lines.append(f"Ojos       mirada h {m.look_h:+.2f}  v {m.look_v:+.2f}")
+            lines.append(t("diag_head") + f"yaw {math.degrees(m.yaw):+6.1f}°  "
+                         f"pitch {math.degrees(m.pitch):+6.1f}°  ·  iris {m.eye_x:.3f}, {m.eye_y:+.3f}"
+                         + (t("diag_blink") if sample.blink else ""))
+            lines.append(t("diag_eyes") + f" h {m.look_h:+.2f}  v {m.look_v:+.2f}")
         else:
-            lines.append("Cabeza     —")
+            lines.append(t("diag_head") + "—")
         if self.gaze is not None:
-            lines.append(f"Mirada     x {self.gaze[0]:6.0f}  y {self.gaze[1]:6.0f}")
+            lines.append(t("diag_gaze") + f"x {self.gaze[0]:6.0f}  y {self.gaze[1]:6.0f}")
         else:
-            lines.append("Mirada     —")
+            lines.append(t("diag_gaze") + "—")
         if self.candidate is not None:
             title = self.candidate.title[:48]
-            lines.append(f"Ventana    {title}  ({self.confidence:.0%})")
+            lines.append(t("diag_window") + f"{title}  ({self.confidence:.0%})")
         else:
-            lines.append("Ventana    —")
-        lines.append(f"Bloqueo    {self.block_reason or '—'}")
+            lines.append(t("diag_window") + "—")
+        lines.append(t("diag_blocked") + (self.block_reason or "—"))
         if self.model is not None:
-            lines.append(f"Modelo     error ≈ {self.accuracy():.0f} px  ·  "
-                         f"{self.data.click_count if self.data else 0} clics aprendidos  ·  "
-                         f"{self.switches} cambios")
-            lines.append(f"Ajuste     espera {self.decider.dwell_s * 1000:.0f} ms  ·  "
-                         f"radio {self._vote_radius():.0f} px")
+            lines.append(t("diag_model", error=self.accuracy(),
+                           clicks=self.data.click_count if self.data else 0,
+                           switches=self.switches))
+            lines.append(t("diag_tuning", dwell=self.decider.dwell_s * 1000,
+                           radius=self._vote_radius()))
         return lines
