@@ -175,3 +175,26 @@ def test_hotkey_parse():
     assert parse("shift+F5") == (0x4, 0x74)
     with pytest.raises(ValueError):
         parse("ctrl+alt")
+
+
+def test_every_string_has_all_languages_with_the_same_placeholders():
+    import string
+    from glance import i18n
+
+    def fields(text):
+        return {f for _, f, _, _ in string.Formatter().parse(text) if f}
+
+    for key, entry in i18n.STRINGS.items():
+        assert set(entry) == set(i18n.LANGUAGES), key
+        assert len({frozenset(fields(text)) for text in entry.values()}) == 1, key
+
+
+def test_language_switch_and_fallback():
+    from glance import i18n
+    try:
+        i18n.set_language("en")
+        assert i18n.t("calibration_saved", accuracy=123.4) == "Calibration saved (accuracy ≈ 123 px)."
+        i18n.set_language("xx")
+        assert i18n.language() == i18n.DEFAULT_LANGUAGE
+    finally:
+        i18n.set_language(i18n.DEFAULT_LANGUAGE)

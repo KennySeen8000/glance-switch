@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 import pystray
 from PIL import Image, ImageDraw
 
-from . import DISPLAY_NAME, startup
+from . import DISPLAY_NAME, i18n, startup
+from .i18n import t
 
 if TYPE_CHECKING:
     from .app import App
@@ -16,7 +17,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 COLORS = {"ok": (79, 140, 255), "off": (130, 138, 152), "warn": (245, 165, 36)}
-DWELL_CHOICES = (("Rápido (200 ms)", 200), ("Normal (350 ms)", 350), ("Lento (600 ms)", 600))
+DWELL_CHOICES = (("dwell_fast", 200), ("dwell_normal", 350), ("dwell_slow", 600))
 
 
 def make_icon(state: str) -> Image.Image:
@@ -56,25 +57,32 @@ class Tray:
         def dwell(label: str, ms: int):
             return Item(label, cmd(f"dwell:{ms}"), checked=lambda item: s.dwell_ms == ms, radio=True)
 
+        def lang(code: str, label: str):
+            return Item(label, cmd(f"lang:{code}"), checked=lambda item: i18n.language() == code,
+                        radio=True)
+
         return pystray.Menu(
-            Item(f"Activado   ({s.hotkey_toggle.title()})", cmd("toggle"),
+            Item(t("menu_enabled", hotkey=s.hotkey_toggle.title()), cmd("toggle"),
                  checked=lambda item: s.enabled, default=True),
             pystray.Menu.SEPARATOR,
-            Item(f"Calibrar…   ({s.hotkey_calibrate.title()})", cmd("calibrate")),
-            Item("Vista previa de cámara", cmd("preview"),
+            Item(t("menu_calibrate", hotkey=s.hotkey_calibrate.title()), cmd("calibrate")),
+            Item(t("menu_preview"), cmd("preview"),
                  checked=lambda item: self.app.preview is not None),
-            Item("Retardo antes de cambiar", pystray.Menu(*(dwell(l, ms) for l, ms in DWELL_CHOICES))),
-            Item("Opciones", pystray.Menu(
-                flag("Mostrar punto de mirada", "show_gaze_dot"),
-                flag("Destello al cambiar de ventana", "flash_on_switch"),
-                flag("Aprender de mis clics", "learn_from_clicks"),
-                flag("Pausar con apps a pantalla completa", "pause_on_fullscreen"),
-                Item("Iniciar con Windows", cmd("startup"),
+            Item(t("menu_delay"), pystray.Menu(*(dwell(t(key), ms) for key, ms in DWELL_CHOICES))),
+            # Shown in both languages so it can be found whichever one is active.
+            Item("Idioma / Language", pystray.Menu(
+                *(lang(code, label) for code, label in i18n.LANGUAGES.items()))),
+            Item(t("menu_options"), pystray.Menu(
+                flag(t("opt_gaze_dot"), "show_gaze_dot"),
+                flag(t("opt_flash"), "flash_on_switch"),
+                flag(t("opt_learn"), "learn_from_clicks"),
+                flag(t("opt_fullscreen"), "pause_on_fullscreen"),
+                Item(t("opt_startup"), cmd("startup"),
                      checked=lambda item: startup.is_enabled()),
             )),
-            Item("Abrir carpeta de datos", cmd("open_folder")),
+            Item(t("menu_open_folder"), cmd("open_folder")),
             pystray.Menu.SEPARATOR,
-            Item("Salir", cmd("quit")),
+            Item(t("menu_quit"), cmd("quit")),
         )
 
     def start(self) -> None:
@@ -86,6 +94,10 @@ class Tray:
             self.icon.icon = self._icons[state]
         if self.icon.title != tooltip:
             self.icon.title = tooltip
+
+    def rebuild_menu(self) -> None:
+        """Recreate the menu so its labels follow a language change."""
+        self.icon.menu = self._menu()
 
     def refresh_menu(self) -> None:
         try:

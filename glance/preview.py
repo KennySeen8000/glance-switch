@@ -8,6 +8,7 @@ import cv2
 from PIL import Image, ImageTk
 
 from .features import LEFT_EYE, RIGHT_EYE
+from .i18n import t
 from .tracker import Tracker
 
 WIDTH = 640
@@ -22,7 +23,7 @@ class Preview:
         self.status_lines = status_lines
         self.on_close = on_close
         self.top = tk.Toplevel(root)
-        self.top.title("Glance Switch · Vista previa")
+        self.top.title(t("preview_title"))
         self.top.configure(bg="#0b0d12")
         self.top.resizable(False, False)
         self.top.protocol("WM_DELETE_WINDOW", self.close)

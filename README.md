@@ -25,7 +25,7 @@ mirada; pulsa **Espacio** para guardar o **R** para repetir.
 
 Desde el icono de la bandeja: retardo (rápido / normal / lento), vista previa
 de la cámara con diagnóstico, punto de mirada, destello al cambiar, iniciar
-con Windows, etc.
+con Windows, idioma de la interfaz (*Idioma / Language*: español o inglés), etc.
 
 ## Llevarlo a otro PC (sin instalar Python)
 
